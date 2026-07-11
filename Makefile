@@ -30,7 +30,7 @@ help:
 	@echo ""
 
 build: go.sum
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(BUILD_FLAGS) -o $(BIN) .
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go mod tidy && go build $(BUILD_FLAGS) -o $(BIN) .
 	@ln -sf $(notdir $(BIN)) bin/$(BINARY_NAME)
 
 build-all: go.sum
