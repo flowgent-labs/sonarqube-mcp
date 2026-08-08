@@ -48,7 +48,7 @@ func (r *virtualRegistry) CallTool(ctx context.Context, name string, args map[st
 
 // loadVirtualTools loads virtual tools from config and returns a name→entry map.
 func loadVirtualTools() map[string]pipeline.VirtualToolEntry {
-	cfgPath := mcputils.VirtualConfigPath("sonarqube-mcp")
+	cfgPath := mcputils.VirtualConfigPath()
 	aggEngine, err := engine.New(cfgPath, &virtualRegistry{}, &mcputils.NamedUpstreamHTTPClient{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load virtual tools: %v\n", err)
@@ -98,7 +98,7 @@ func ListTools() {
 	})
 
 	if len(nativeTools) == 0 {
-		fmt.Fprintf(os.Stderr, "Warning: no native tools are enabled. To expose native tools, set nativeTools.expose.register_all_tools_by_default: true or add tool names to tools.expose.includes in ~/.sonarqube-mcp/config.yaml\n")
+		fmt.Fprintf(os.Stderr, "Warning: no native tools are enabled. To expose native tools, set native_tools.expose.register_all_tools_by_default: true or add tool names to tools.expose.includes in ~/.sonarqube-mcp/config.yaml\n")
 	}
 
 	fmt.Printf("Available subcommands (%d):\n", len(allTools))

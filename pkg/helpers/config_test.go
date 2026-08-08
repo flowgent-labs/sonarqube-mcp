@@ -249,7 +249,12 @@ func TestMatchConfigKey(t *testing.T) {
 }
 
 func TestVirtualConfigPath(t *testing.T) {
-	got := VirtualConfigPath("test-mcp")
+	// Must call LoadConfig first to initialise the package-level serviceName.
+	_, err := LoadConfig("test-mcp")
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	got := VirtualConfigPath()
 	if got == "" {
 		t.Error("VirtualConfigPath returned empty")
 	}
@@ -263,19 +268,19 @@ func TestVirtualConfigPath(t *testing.T) {
 func TestLogPrintAuth(t *testing.T) {
 	t.Run("disabled by default", func(t *testing.T) {
 		SetConfig(&Config{})
-		if logPrintAuth() {
+		if loggingPrintAuth() {
 			t.Error("should be disabled")
 		}
 	})
 	t.Run("enabled", func(t *testing.T) {
-		SetConfig(&Config{Runtime: mcpconfig.RuntimeConfig{LogAuthorization: true}})
-		if !logPrintAuth() {
+		SetConfig(&Config{Logging: mcpconfig.LoggingConfig{AuthVerbose: true}})
+		if !loggingPrintAuth() {
 			t.Error("should be enabled")
 		}
 	})
 	t.Run("nil config", func(t *testing.T) {
 		SetConfig(nil)
-		if logPrintAuth() {
+		if loggingPrintAuth() {
 			t.Error("nil config should be disabled")
 		}
 	})
@@ -301,16 +306,7 @@ func TestResolveDownloadDir(t *testing.T) {
 		if dir == "" {
 			t.Error("download dir should not be empty")
 		}
-	})
-	t.Run("custom", func(t *testing.T) {
-		customDir := filepath.Join(t.TempDir(), "custom-downloads")
-		SetConfig(&Config{Runtime: mcpconfig.RuntimeConfig{DownloadDir: customDir}})
-		dir, err := resolveDownloadDir()
-		if err != nil {
-			t.Errorf("resolveDownloadDir should not error: %v", err)
-		}
-		if dir != customDir {
-			t.Errorf("got %q, want %q", dir, customDir)
-		}
+		// Download dir is hardcoded to ~/.{serviceName}/ifs/download.
+		// (Users deploying on k8s can mount volumes to this fixed path.)
 	})
 }

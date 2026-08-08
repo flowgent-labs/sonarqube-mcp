@@ -33,14 +33,16 @@ type MgmtConfig = mcpconfig.MgmtConfig
 type PprofConfig = mcpconfig.PprofConfig
 type OtelConfig = mcpconfig.OtelConfig
 type MetricsConfig = mcpconfig.MetricsConfig
-type RuntimeConfig = mcpconfig.RuntimeConfig
+type LoggingConfig = mcpconfig.LoggingConfig
+type IFSConfig = mcpconfig.IFSConfig
+type VirtualToolPipelineConfig = mcpconfig.VirtualToolPipelineConfig
 
 // ---- singleton config access ----
 
 var (
 	globalCfg   *Config
 	globalCfgMu sync.RWMutex
-	binaryName  string
+	serviceName string
 )
 
 // SetConfig stores the global config for use by all packages.
@@ -63,17 +65,23 @@ const envPrefix = "MCP__"
 
 // ---- config loading ----
 
-// LoadConfig reads config.yaml from $HOME/.{binaryName}/config.yaml using viper.
-// MCP__ environment variables override config file values (e.g. MCP__SERVER__AUTH__OIDC__CLIENT_ID
-// overrides server.auth.oidc.client_id). Note: upstream.* map entries do not have env var
-// overrides; configure them in YAML directly. Returns defaults when the file is missing.
+// LoadConfig reads config.yaml from $HOME/.{serviceName}/config.yaml using viper.
+// MCP__ environment variables override all config file values (structs, maps, and arrays),
+// with Spring Boot-style 0-based index notation for slices (e.g. MCP__VIRTUAL_TOOLS__0__NAME).
+// Priority: CLI flags (where applicable) > ENV > config.yaml.
+// Returns defaults when the file is missing.
 func LoadConfig(name string) (*Config, error) {
-	binaryName = name
+	serviceName = name
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("home dir: %w", err)
 	}
-	configPath := filepath.Join(home, "."+binaryName, "config.yaml")
+	// Allow MCP__SERVER__SERVICE_NAME env to point to a custom config location.
+	configDir := serviceName
+	if env := os.Getenv("MCP__SERVER__SERVICE_NAME"); env != "" {
+		configDir = env
+	}
+	configPath := filepath.Join(home, "."+configDir, "config.yaml")
 
 	v := viper.New()
 	v.SetConfigFile(configPath)
@@ -93,13 +101,10 @@ func LoadConfig(name string) (*Config, error) {
 		return nil, fmt.Errorf("parse config %s: %w", configPath, err)
 	}
 
-	// Apply MCP__ env overrides on top (env > YAML)
-	applyEnvOverrides(v, cfg)
-
-	// Re-unmarshal with overrides applied
-	if err := v.Unmarshal(cfg, viperDecoderOpts()); err != nil {
-		return nil, fmt.Errorf("parse config after env override: %w", err)
-	}
+	// Apply MCP__ env overrides via reflection-based setByPath (env > YAML).
+	// This handles all config sections including array indices
+	// (e.g. MCP__NATIVE_TOOLS__EXPOSE__INCLUDES__0=Tool1).
+	applyEnvToConfig(cfg)
 
 	return cfg, nil
 }
@@ -113,7 +118,8 @@ func viperDecoderOpts() viper.DecoderConfigOption {
 
 // applyEnvOverrides walks the Config schema via reflection, maps each leaf field to
 // its MCP__ env var name, and calls v.Set for every matching environment variable.
-// Map-valued fields (upstream.*) are handled separately by iterating the runtime keys.
+// Map-valued fields (upstream.*) are handled by iterating the runtime keys.
+// Array indices are supported via envVarToPath fallback for unmatched MCP__ env vars.
 func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	envToKey := make(map[string]string)
 	collectEnvKeys(reflect.TypeOf(cfg).Elem(), nil, envToKey)
@@ -130,6 +136,11 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 		}
 		if key, found := envToKey[name]; found {
 			v.Set(key, val)
+		} else if dotted, ok := envVarToPath(name); ok {
+			// Use reflection-based setByPath for array indices and other
+			// paths not pre-computed by collectEnvKeys — Viper's v.Set
+			// doesn't handle numeric array indices in dotted paths.
+			setByPath(reflect.ValueOf(cfg).Elem(), strings.Split(dotted, "."), val)
 		}
 	}
 }
@@ -139,9 +150,9 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 // viper Unmarshal which zeroes defaults in map entries like
 // upstream.default.enable_mcp_session_forward.
 //
-// Works generically for any field in the Config tree — structs, maps, strings,
-// bools, ints. Map entries (upstream.*) are discovered by iterating the
-// runtime map keys of cfg.Upstream.
+// Works generically for any field in the Config tree — structs, maps, slices,
+// strings, bools, ints. Map entries (upstream.*) are discovered by iterating the
+// runtime map keys of cfg.Upstream. Array indices use envVarToPath fallback.
 func applyEnvToConfig(cfg *Config) {
 	envToKey := make(map[string]string)
 	collectEnvKeys(reflect.TypeOf(cfg).Elem(), nil, envToKey)
@@ -156,7 +167,13 @@ func applyEnvToConfig(cfg *Config) {
 		}
 		dotted, found := envToKey[name]
 		if !found {
-			continue
+			// Fallback: generic env→dotted path for array indices and other
+			// paths not pre-computed by collectEnvKeys.
+			var ok bool
+			dotted, ok = envVarToPath(name)
+			if !ok {
+				continue
+			}
 		}
 		setByPath(reflect.ValueOf(cfg).Elem(), strings.Split(dotted, "."), val)
 	}
@@ -167,7 +184,15 @@ func applyEnvToConfig(cfg *Config) {
 // matchConfigKey). Map segments: the next seg is the map key (case-folded);
 // the value is read, modified, and written back (Go maps hold non-pointer
 // values for struct entries, so copy-modify-reinsert is necessary).
+// Slice segments: the next seg is a numeric 0-based index; the slice is
+// grown if needed (Spring Boot-style index notation for ENV overrides, e.g.
+// MCP__NATIVE_TOOLS__EXPOSE__INCLUDES__0=Tool1).
 func setByPath(v reflect.Value, segs []string, val string) {
+	// Terminal case: no more segments — set v to val.
+	if len(segs) == 0 {
+		setLeafValue(v, val)
+		return
+	}
 	for len(segs) > 0 {
 		if v.Kind() == reflect.Ptr {
 			v = v.Elem()
@@ -193,12 +218,37 @@ func setByPath(v reflect.Value, segs []string, val string) {
 			return
 		}
 
+		if v.Kind() == reflect.Slice {
+			idx, err := strconv.Atoi(seg)
+			if err != nil {
+				return
+			}
+			// Grow slice if needed
+			if v.Len() <= idx {
+				newSlice := reflect.MakeSlice(v.Type(), idx+1, idx+1)
+				reflect.Copy(newSlice, v)
+				v.Set(newSlice)
+			}
+			elem := v.Index(idx)
+			if len(segs) == 0 {
+				setLeafValue(elem, val)
+			} else {
+				setByPath(elem, segs, val)
+			}
+			return
+		}
+
 		if v.Kind() != reflect.Struct {
 			return
 		}
 		f := fieldByYAML(v, seg)
 		if !f.IsValid() {
 			return
+		}
+		// Initialize nil pointer-to-struct fields so we can walk into them
+		// (e.g. native_tools.expose is *NativeToolsExposeConfig).
+		if f.Kind() == reflect.Ptr && f.IsNil() {
+			f.Set(reflect.New(f.Type().Elem()))
 		}
 		if len(segs) == 0 {
 			setLeafValue(f, val)
@@ -234,6 +284,13 @@ func fieldByYAML(v reflect.Value, name string) reflect.Value {
 
 // setLeafValue sets a scalar field to the given string value.
 func setLeafValue(f reflect.Value, val string) {
+	// Unwrap pointer fields (e.g. *bool in mgmt.enabled, *string, *int).
+	for f.Kind() == reflect.Ptr {
+		if f.IsNil() {
+			f.Set(reflect.New(f.Type().Elem()))
+		}
+		f = f.Elem()
+	}
 	switch f.Kind() {
 	case reflect.String:
 		f.SetString(val)
@@ -278,12 +335,43 @@ func collectEnvKeys(t reflect.Type, path []string, out map[string]string) {
 			collectEnvKeys(ft, segs, out)
 			continue
 		}
+		// Slice of structs: walk element type with placeholder index "0"
+		// (Spring Boot-style: MCP__VIRTUAL_TOOLS__0__NAME).
+		if ft.Kind() == reflect.Slice {
+			et := ft.Elem()
+			for et.Kind() == reflect.Ptr {
+				et = et.Elem()
+			}
+			if et.Kind() == reflect.Struct {
+				collectEnvKeys(et, append(append([]string(nil), segs...), "0"), out)
+			}
+			continue
+		}
 		envSegs := make([]string, len(segs))
 		for j, s := range segs {
 			envSegs[j] = keyToEnvSegment(s)
 		}
 		out[envPrefix+strings.Join(envSegs, "__")] = strings.Join(segs, ".")
 	}
+}
+
+// envVarToPath converts an MCP__ env var name to a dotted config path.
+// Returns false when the env var does not have the MCP__ prefix.
+// This is the generic fallback for paths not pre-computed by collectEnvKeys,
+// including array indices (e.g. MCP__VIRTUAL_TOOLS__0__NAME → "virtual_tools.0.name").
+func envVarToPath(envName string) (string, bool) {
+	if !strings.HasPrefix(envName, envPrefix) {
+		return "", false
+	}
+	parts := strings.Split(envName, "__")
+	if len(parts) < 2 {
+		return "", false
+	}
+	segs := make([]string, 0, len(parts)-1)
+	for _, p := range parts[1:] { // skip "MCP"
+		segs = append(segs, strings.ToLower(p))
+	}
+	return strings.Join(segs, "."), true
 }
 
 // keyToEnvSegment converts a config key segment to UPPER_SNAKE for env var names.
@@ -332,13 +420,29 @@ func normalizeConfigKey(s string) string {
 	return b.String()
 }
 
-// VirtualConfigPath returns the path to the config file for virtual tools.
-func VirtualConfigPath(binaryName string) string {
+// resolveServiceName returns the effective service name for filesystem paths
+// and OpenTelemetry resource attributes. Resolution order:
+//  1. MCP__SERVER__SERVICE_NAME environment variable
+//  2. server.service_name in the loaded config (SetConfig must have been called)
+//  3. The default name passed to LoadConfig (the generated MCP server binary name)
+func resolveServiceName() string {
+	if env := os.Getenv("MCP__SERVER__SERVICE_NAME"); env != "" {
+		return env
+	}
+	cfg := GetConfig()
+	if cfg != nil && cfg.Server.ServiceName != "" {
+		return cfg.Server.ServiceName
+	}
+	return serviceName
+}
+
+// VirtualConfigPath returns the path to the config file for diagnostics and logging.
+func VirtualConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, "."+binaryName, "config.yaml")
+	return filepath.Join(home, "."+resolveServiceName(), "config.yaml")
 }
 
 // ---- legacy helpers (populated from config for backward compatibility) ----
@@ -479,32 +583,29 @@ func IsNamedUpstreamSessionForwardEnabled(name string) bool {
 	return false
 }
 
-// logPrintAuth returns whether Authorization header values are printed in logs.
-func logPrintAuth() bool {
+// loggingPrintAuth returns whether Authorization header values are printed in logs.
+func loggingPrintAuth() bool {
 	cfg := GetConfig()
-	return cfg != nil && cfg.Runtime.LogAuthorization
+	return cfg != nil && cfg.Logging.AuthVerbose
 }
 
 // resolveUploadDir returns the directory where uploaded files are staged.
-// Defaults to ~/.{binaryName}/uploads.
+// Defaults to ~/.{serviceName}/ifs/upload.
 func resolveUploadDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err == nil {
-		return filepath.Join(home, "."+binaryName, "uploads"), nil
+		return filepath.Join(home, "."+resolveServiceName(), "ifs", "upload"), nil
 	}
-	return "." + binaryName + "/uploads", nil
+	return filepath.Join("."+resolveServiceName(), "ifs", "upload"), nil
 }
 
 // resolveDownloadDir returns the directory for downloaded files.
-// Uses the configured download_dir or defaults to ~/.{binaryName}/downloads.
+// Hardcoded to ~/.{serviceName}/ifs/download (users deploying on k8s can mount
+// a volume to this fixed path).
 func resolveDownloadDir() (string, error) {
-	cfg := GetConfig()
-	if cfg != nil && cfg.Runtime.DownloadDir != "" {
-		return cfg.Runtime.DownloadDir, nil
-	}
 	home, err := os.UserHomeDir()
 	if err == nil {
-		return filepath.Join(home, "."+binaryName, "downloads"), nil
+		return filepath.Join(home, "."+resolveServiceName(), "ifs", "download"), nil
 	}
-	return "." + binaryName + "/downloads", nil
+	return filepath.Join("."+resolveServiceName(), "ifs", "download"), nil
 }
