@@ -236,55 +236,105 @@ except Exception as e:
 }
 
 call_tool() {
-  local tool_name="${1:?Usage: call_tool <tool-name> [json-args] [--file <path>]}"
+  local tool_name="${1:?Usage: call_tool <tool-name> [json-args] [--key value ...] [--body '<json>']}"
   shift
   local args='{}'
   local file_path=""
+  local body_json=""
 
-  # Parse --file flag
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --file)
-        file_path="${2:?--file requires a path argument}"
-        shift 2
-        ;;
-      *)
-        args="$1"
-        shift
-        ;;
-    esac
-  done
+  # Detect argument style: --key value pairs (new) vs positional JSON (legacy).
+  if [ $# -gt 0 ] && [ "${1#--}" != "$1" ]; then
+    # New style: --key value [--key value ...] [--body '<json>']
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --file)
+          file_path="${2:?--file requires a path argument}"
+          shift 2
+          ;;
+        --body)
+          body_json="${2:?--body requires a JSON value}"
+          shift 2
+          ;;
+        --*)
+          local key="${1#--}"
+          local value="${2:?$1 requires a value}"
+          if command -v python3 >/dev/null 2>&1; then
+            args=$(python3 -c "
+import json, sys
+v = '''$value'''
+# Try JSON parse; if it fails treat as raw string.
+try:    v = json.loads(v)
+except: pass
+args = json.loads('''$args''')
+args['$key'] = v
+print(json.dumps(args))
+" 2>/dev/null || echo "$args")
+          else
+            args=$(echo "$args" | sed 's/}$//')
+            args="${args},\"$key\":\"$value\"}"
+          fi
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
 
-  echo "[*] Calling tool: $tool_name" >&2
-  echo "[*] Args: $args" >&2
-
-  # If --file is provided, send the file content as base64 via file_content,
-  # using the basename as file_name. For stdio mode the server reads from
-  # ~/.{project}/upload/; for HTTP mode the server decodes the base64 inline.
-  if [ -n "$file_path" ]; then
-    if [ ! -f "$file_path" ]; then
-      echo "[!] File not found: $file_path" >&2
-      return 1
+    # Merge --body into args.
+    if [ -n "$body_json" ]; then
+      if command -v python3 >/dev/null 2>&1; then
+        args=$(python3 -c "
+import json
+args = json.loads('''$args''')
+args['body'] = json.loads('''$body_json''')
+print(json.dumps(args))
+" 2>/dev/null || echo "$args")
+      fi
     fi
-    local file_size file_name file_b64
-    file_size=$(wc -c < "$file_path" | tr -d ' ')
-    file_name=$(basename "$file_path")
-    echo "[*] Uploading file: $file_path ($file_size bytes) as $file_name" >&2
+  else
+    # Legacy style: positional JSON arg with optional --file.
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --file)
+          file_path="${2:?--file requires a path argument}"
+          shift 2
+          ;;
+        *)
+          args="$1"
+          shift
+          ;;
+      esac
+    done
 
-    if command -v python3 >/dev/null 2>&1; then
-      file_b64=$(python3 -c "import base64,sys; print(base64.b64encode(open(sys.argv[1],'rb').read()).decode())" "$file_path" 2>/dev/null)
-      args=$(python3 -c "
+    # If --file is provided, send the file content as base64 via file_content.
+    if [ -n "$file_path" ]; then
+      if [ ! -f "$file_path" ]; then
+        echo "[!] File not found: $file_path" >&2
+        return 1
+      fi
+      local file_size file_name file_b64
+      file_size=$(wc -c < "$file_path" | tr -d ' ')
+      file_name=$(basename "$file_path")
+      echo "[*] Uploading file: $file_path ($file_size bytes) as $file_name" >&2
+
+      if command -v python3 >/dev/null 2>&1; then
+        file_b64=$(python3 -c "import base64,sys; print(base64.b64encode(open(sys.argv[1],'rb').read()).decode())" "$file_path" 2>/dev/null)
+        args=$(python3 -c "
 import json, sys
 args = json.loads('$args')
 args['file_name'] = '$file_name'
 args['file_content'] = '$file_b64'
 print(json.dumps(args))
 " 2>/dev/null || echo "$args")
-    else
-      # Fallback: set file_name only, user must place file in upload dir
-      args=$(echo "$args" | sed 's/}$/}/' | sed "s/}\"$/,\"file_name\":\"$file_name\"}/" | sed "s/{}/{\"file_name\":\"$file_name\"}/")
+      else
+        args=$(echo "$args" | sed 's/}$/}/' | sed "s/}\"$/,\"file_name\":\"$file_name\"}/" | sed "s/{}/{\"file_name\":\"$file_name\"}/")
+      fi
     fi
   fi
+
+  echo "[*] Calling tool: $tool_name" >&2
+  echo "[*] Args: $args" >&2
 
   local result
   result=$(mcp_request tools/call 1 "{\"name\":\"$tool_name\",\"arguments\":$args}")

@@ -113,13 +113,13 @@ native_tools:
     # Takes precedence: tools listed here are always exposed,
     # even if register_all_tools_by_default is false.
     includes:
-      - GetIssuesList
-      - GetIssuesSearch
-      - GetSourcesIssueSnippets
-      - GetComponentsShow
-      - GetProjectsExportFindings
-      - GetQualityProfilesSearch
-      - GetQualityProfilesShow
+      #- GetIssuesList
+      #- GetIssuesSearch
+      #- GetSourcesIssueSnippets
+      #- GetComponentsShow
+      #- GetProjectsExportFindings
+      #- GetQualityProfilesSearch
+      #- GetQualityProfilesShow
 
     # Explicitly hide these tools from external agents (operationId values).
     # Takes precedence over register_all_tools_by_default.

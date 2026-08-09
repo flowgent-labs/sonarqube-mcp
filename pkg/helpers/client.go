@@ -41,6 +41,95 @@ func GetHTTPHeaders(ctx context.Context) http.Header {
 	return nil
 }
 
+// isFileRefValue reports whether s is a file-reference URI prefix.
+// Recognised prefixes: @file:///, @https://, @http:// (curl -F style).
+func isFileRefValue(s string) bool {
+	return strings.HasPrefix(s, "@file:///") ||
+		strings.HasPrefix(s, "@https://") ||
+		strings.HasPrefix(s, "@http://")
+}
+
+// extractFileRefsFromBody scans a body map for values that start with a
+// @file / @http / @https prefix and returns fieldName → URI (with @ stripped).
+func extractFileRefsFromBody(body map[string]interface{}) map[string]string {
+	refs := make(map[string]string)
+	for k, v := range body {
+		if s, ok := v.(string); ok && isFileRefValue(s) {
+			refs[k] = s[1:] // strip leading '@'
+		}
+	}
+	return refs
+}
+
+// buildMultipartFormBody downloads each file URI to the IFS temp directory,
+// builds a multipart/form-data body with non-file fields as form fields and
+// file fields as file parts, and returns the serialised body bytes, the
+// Content-Type header (with boundary), and any error.  Temp files are removed
+// after the body is built (the data lives in the returned byte slice).
+func buildMultipartFormBody(ctx context.Context, body map[string]interface{}, fileRefs map[string]string) ([]byte, string, error) {
+	tmpDir, err := resolveUploadTmpDir()
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve upload tmp dir: %w", err)
+	}
+
+	localFiles := make(map[string]string) // fieldName → localPath
+	origNames := make(map[string]string)  // fieldName → original filename
+	for fieldName, uri := range fileRefs {
+		if uri == "" {
+			continue
+		}
+		localPath, origName, err := downloadFileFromURI(ctx, uri, tmpDir)
+		if err != nil {
+			for _, lp := range localFiles {
+				os.Remove(lp)
+			}
+			return nil, "", fmt.Errorf("download %s from %s: %w", fieldName, uri, err)
+		}
+		localFiles[fieldName] = localPath
+		origNames[fieldName] = origName
+	}
+
+	// Temp files are no longer needed once the multipart buffer is built.
+	defer func() {
+		for _, lp := range localFiles {
+			os.Remove(lp)
+		}
+	}()
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	for key, val := range body {
+		if _, isFile := fileRefs[key]; isFile {
+			continue
+		}
+		writer.WriteField(key, valueToString(val))
+	}
+
+	for fieldName, localPath := range localFiles {
+		origName := origNames[fieldName]
+		if origName == "" {
+			origName = filepath.Base(localPath)
+		}
+		part, err := writer.CreateFormFile(fieldName, origName)
+		if err != nil {
+			return nil, "", fmt.Errorf("create form file %s: %w", fieldName, err)
+		}
+		f, err := os.Open(localPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("open local file %s: %w", localPath, err)
+		}
+		if _, err := io.Copy(part, f); err != nil {
+			f.Close()
+			return nil, "", fmt.Errorf("copy file data %s: %w", fieldName, err)
+		}
+		f.Close()
+	}
+
+	writer.Close()
+	return buf.Bytes(), writer.FormDataContentType(), nil
+}
+
 // ForwardRequest sends an HTTP request to the upstream endpoint and returns the response.
 // All HTTP headers stored in ctx are forwarded to the upstream service.
 func ForwardRequest(ctx context.Context, upstreamBase string, method string, path string, args map[string]interface{}, pathKeys []string, contentType string) (*http.Response, error) {
@@ -80,11 +169,26 @@ func ForwardRequest(ctx context.Context, upstreamBase string, method string, pat
 		} else {
 			bodyData = buildJSONBody(args, pathKeys)
 		}
-		bodyBytes, err = marshalJSONNoSci(bodyData)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+
+		// Auto-detect @file://, @https://, @http:// value prefixes and switch
+		// to multipart/form-data.  Files are downloaded to IFS temp cache and
+		// forwarded as file parts; other fields become plain form fields.
+		if bodyMap, ok := bodyData.(map[string]interface{}); ok {
+			if fileRefs := extractFileRefsFromBody(bodyMap); len(fileRefs) > 0 {
+				bodyBytes, contentType, err = buildMultipartFormBody(ctx, bodyMap, fileRefs)
+				if err != nil {
+					return nil, fmt.Errorf("failed to build multipart body: %w", err)
+				}
+				bodyReader = bytes.NewReader(bodyBytes)
+			}
 		}
-		bodyReader = strings.NewReader(string(bodyBytes))
+		if bodyReader == nil {
+			bodyBytes, err = marshalJSONNoSci(bodyData)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal request body: %w", err)
+			}
+			bodyReader = strings.NewReader(string(bodyBytes))
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, upstreamURL, bodyReader)
@@ -662,8 +766,42 @@ func resolveUploadTmpDir() (string, error) {
 
 // downloadFileFromURI download a file from the given URI to a local
 // temporary file and returns the local file path and original filename.
+// Supports file:/// (local filesystem) and http(s):// (remote download).
 // The caller is responsible for removing the file when it is no longer needed.
 func downloadFileFromURI(ctx context.Context, uri string, tmpDir string) (localPath string, originalName string, err error) {
+	// Handle file:/// URIs — copy directly from local filesystem.
+	if strings.HasPrefix(uri, "file://") {
+		filePath := strings.TrimPrefix(uri, "file://")
+		// Also handle file://localhost/... and file:///...
+		filePath = strings.TrimPrefix(filePath, "localhost")
+		if !strings.HasPrefix(filePath, "/") {
+			return "", "", fmt.Errorf("invalid file URI: %s", uri)
+		}
+		if err := os.MkdirAll(tmpDir, 0755); err != nil {
+			return "", "", fmt.Errorf("create tmp dir %s: %w", tmpDir, err)
+		}
+		origName := filepath.Base(filePath)
+		fileID := generateFileID(origName)
+		localPath = filepath.Join(tmpDir, fileID)
+
+		src, err := os.Open(filePath)
+		if err != nil {
+			return "", "", fmt.Errorf("open %s: %w", filePath, err)
+		}
+		defer src.Close()
+
+		dst, err := os.Create(localPath)
+		if err != nil {
+			return "", "", fmt.Errorf("create %s: %w", localPath, err)
+		}
+		defer dst.Close()
+
+		if _, err := io.Copy(dst, src); err != nil {
+			return "", "", fmt.Errorf("copy %s: %w", filePath, err)
+		}
+		return localPath, origName, nil
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "GET", uri, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create download request for %s: %w", uri, err)
