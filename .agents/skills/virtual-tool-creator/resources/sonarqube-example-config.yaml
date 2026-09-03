@@ -632,7 +632,7 @@ virtual_tools:
                 uncoveredConditionFiles: ($uncoveredConditionFiles | length),
                 uncoveredConditions: ([$uncoveredConditionFiles[]? | .lines[]?] | length),
                 duplicateDensityFiles: ($duplicateDensityFiles | length),
-                duplicateLinesFiles: ($duplicateLineFiles | length),
+                duplicateLineFiles: ($duplicateLineFiles | length),
                 totalActionItems: (($issueItems | length) + ($uncoveredLineFiles | length) + ($uncoveredConditionFiles | length) + ($duplicateDensityFiles | length) + ($duplicateLineFiles | length))
               },
               buckets: {
