@@ -614,35 +614,35 @@ virtual_tools:
                 | {key, path, value: .density, lines: .lines, blocks: .blocks}
               ] as $duplicateDensityFiles
             | [
-              ($duplicateMetrics.files // [])[]?
-              | select(((((.lines // "0") | tonumber?) // 0) > 0))
-              | {key, path, value: .lines, density: .density, blocks: .blocks}
-            ] as $duplicateLineFiles
+                ($duplicateMetrics.files // [])[]?
+                | select(((((.lines // "0") | tonumber?) // 0) > 0))
+                | {key, path, value: .lines, density: .density, blocks: .blocks}
+              ] as $duplicateLineFiles
             | {
-                project: $project,
-                branch: $branch,
-                pullRequest: $pullRequest,
-                summary: {
-                  sonarIssues: {
-                    total: ($rawIssues.total // ($issueItems | length)),
-                    returned: ($issueItems | length)
-                  },
-                  uncoveredLineFiles: ($uncoveredLineFiles | length),
-                  uncoveredLines: (($uncoveredLineFiles[]? | .lines[]?) | length),
-                  uncoveredConditionFiles: ($uncoveredConditionFiles | length),
-                  uncoveredConditions: (($uncoveredConditionFiles[]? | .lines[]?) | length),
-                  duplicateDensityFiles: ($duplicateDensityFiles | length),
-                  duplicateLines: ($duplicateLineFiles | length),
-                  totalActionItems: (($issueItems | length) + ($uncoveredLineFiles | length) + ($uncoveredConditionFiles | length) + ($duplicateDensityFiles | length) + ($duplicateLineFiles | length))
+              project: $project,
+              branch: $branch,
+              pullRequest: $pullRequest,
+              summary: {
+                sonarIssues: {
+                  total: ($rawIssues.total // ($issueItems | length)),
+                  returned: ($issueItems | length)
                 },
-                buckets: {
-                  sonarIssues: $issueItems,
-                  uncoveredLines: $uncoveredLineFiles,
-                  uncoveredConditions: $uncoveredConditionFiles,
-                  duplicateDensity: $duplicateDensityFiles,
-                  duplicateLines: $duplicateLineFiles
-                }
+                uncoveredLineFiles: ($uncoveredLineFiles | length),
+                uncoveredLines: ([$uncoveredLineFiles[]? | .lines[]?] | length),
+                uncoveredConditionFiles: ($uncoveredConditionFiles | length),
+                uncoveredConditions: ([$uncoveredConditionFiles[]? | .lines[]?] | length),
+                duplicateDensityFiles: ($duplicateDensityFiles | length),
+                duplicateLinesFiles: ($duplicateLineFiles | length),
+                totalActionItems: (($issueItems | length) + ($uncoveredLineFiles | length) + ($uncoveredConditionFiles | length) + ($duplicateDensityFiles | length) + ($duplicateLineFiles | length))
+              },
+              buckets: {
+                sonarIssues: $issueItems,
+                uncoveredLines: $uncoveredLineFiles,
+                uncoveredConditions: $uncoveredConditionFiles,
+                duplicateDensity: $duplicateDensityFiles,
+                duplicateLines: $duplicateLineFiles
               }
+            }
 
   # ---- get_overall_issues ---------------------------------------------------
   - name: get_overall_issues
