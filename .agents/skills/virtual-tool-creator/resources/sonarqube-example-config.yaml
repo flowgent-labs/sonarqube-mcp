@@ -136,7 +136,7 @@ native_tools:
 # e.g: 5-step pipeline (call → jq → foreach → emit → return).
 # Schema: https://github.com/flowgent-labs/mcpfather/blob/main/.agents/skills/virtual-tool-creator/resources/dsl-schema.json
 virtual_tools:
-  # ----- get_newcode_issues --------------------------------------------------
+  # ---- get_newcode_issues ---------------------------------------------------
   - name: get_newcode_issues
     enabled: true
     description: |
@@ -664,7 +664,7 @@ virtual_tools:
         component:
           type: string
           default: ""
-          description: Optional file path filter. Full SonarQube component key (e.g., "rengine:src/main/java/Foo.java") or relative path under project.
+          description: Optional file path filter. Full SonarQube component key (e.g., "rengine:src/main/java/Foo.java") or relative path
         limit:
           type: integer
           default: 50
@@ -702,9 +702,10 @@ virtual_tools:
             resolved: "false"
             inNewCodePeriod: $opts.newCodeOnly
             ps: $opts.limit
-        require:
-          field: "issues"
-          message: SonarQube issues search response is missing the issues field.
+          require:
+            field: "issues"
+            nonEmpty: true
+            message: No issues found for the given project and branch.
       - id: enriched
         kind: foreach
         spec:
@@ -726,20 +727,22 @@ virtual_tools:
               spec:
                 from: $issue
                 vars:
+                  issue: $issue
                   snippet: $snippet
                 expr: |
                   {
-                    key,
-                    rule,
-                    severity,
-                    type,
-                    message,
-                    component,
-                    startLine: (.textRange.startLine // .line),
-                    endLine: (.textRange.endLine // .line),
-                    debt,
+                    key: $issue.key,
+                    rule: $issue.rule,
+                    severity: $issue.severity,
+                    type: $issue.type,
+                    message: $issue.message,
+                    component: $issue.component,
+                    path: (($issue.component // "") | split(":") | .[-1]),
+                    startLine: ($issue.textRange.startLine // $issue.line),
+                    endLine: ($issue.textRange.endLine // $issue.line),
+                    debt: $issue.debt,
                     codeSnippet: [
-                      ($snippet | .[] | .sources[]?)
+                      ($snippet // {} | to_entries[] | .value | objects | .sources[]?)
                       | {
                           lineNumber: .line,
                           code: (.code
@@ -763,13 +766,19 @@ virtual_tools:
             branch: $input.branch
             total: $rawIssues.total
           expr: |
-            {
-              project: $project,
-              branch: $branch,
-              summary: {
-                total: $total,
-                returned: length
-              },
-              issues: .
-            }
-
+            . as $issueItems
+            | {
+                project: $project,
+                branch: $branch,
+                summary: {
+                  sonarIssues: {
+                    total: $total,
+                    returned: ($issueItems | length)
+                  },
+                  totalActionItems: ($issueItems | length)
+                },
+                buckets: {
+                  sonarIssues: $issueItems
+                },
+                issues: $issueItems
+              }
