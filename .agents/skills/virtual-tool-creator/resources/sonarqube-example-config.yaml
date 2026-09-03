@@ -664,7 +664,7 @@ virtual_tools:
         component:
           type: string
           default: ""
-          description: Optional file path filter. Full SonarQube component key (e.g., "rengine:src/main/java/Foo.java") or relative path
+          description: Optional file path filter. Full SonarQube component key (e.g., "rengine:src/main/java/Foo.java") or relative path under project.
         limit:
           type: integer
           default: 50
@@ -702,10 +702,10 @@ virtual_tools:
             resolved: "false"
             inNewCodePeriod: $opts.newCodeOnly
             ps: $opts.limit
-          require:
-            field: "issues"
-            nonEmpty: true
-            message: No issues found for the given project and branch.
+        require:
+          field: "issues"
+          nonEmpty: true
+          message: No issues found for the given project and branch.
       - id: enriched
         kind: foreach
         spec:
@@ -768,17 +768,17 @@ virtual_tools:
           expr: |
             . as $issueItems
             | {
-                project: $project,
-                branch: $branch,
-                summary: {
-                  sonarIssues: {
-                    total: $total,
-                    returned: ($issueItems | length)
-                  },
-                  totalActionItems: ($issueItems | length)
+              project: $project,
+              branch: $branch,
+              summary: {
+                sonarIssues: {
+                  total: $total,
+                  returned: ($issueItems | length)
                 },
-                buckets: {
-                  sonarIssues: $issueItems
-                },
-                issues: $issueItems
-              }
+                totalActionItems: ($issueItems | length)
+              },
+              buckets: {
+                sonarIssues: $issueItems
+              },
+              issues: $issueItems
+            }
