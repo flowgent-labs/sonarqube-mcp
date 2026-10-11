@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
-	mcputils "sonarqube-mcp/pkg/helpers"
 )
 
 func TestNewPostApplicationsDeleteBranchMCPTool(t *testing.T) {
@@ -48,7 +47,7 @@ func TestPostApplicationsDeleteBranchHandler(t *testing.T) {
 		defer ts.Close()
 
 		t.Setenv("MCP__UPSTREAM__DEFAULT__ENDPOINT", ts.URL)
-		mcputils.LoadConfig("sonarqube-mcp")
+		installTestConfig(t, "sonarqube-mcp")
 
 		req := mcp.CallToolRequest{
 			Params: mcp.CallToolParams{
@@ -74,7 +73,7 @@ func TestPostApplicationsDeleteBranchHandler(t *testing.T) {
 		defer ts.Close()
 
 		t.Setenv("MCP__UPSTREAM__DEFAULT__ENDPOINT", ts.URL)
-		mcputils.LoadConfig("sonarqube-mcp")
+		installTestConfig(t, "sonarqube-mcp")
 
 		req := mcp.CallToolRequest{
 			Params: mcp.CallToolParams{
@@ -98,7 +97,7 @@ func TestPostApplicationsDeleteBranchHandler(t *testing.T) {
 		defer ts.Close()
 
 		t.Setenv("MCP__UPSTREAM__DEFAULT__ENDPOINT", ts.URL)
-		mcputils.LoadConfig("sonarqube-mcp")
+		installTestConfig(t, "sonarqube-mcp")
 
 		req := mcp.CallToolRequest{
 			Params: mcp.CallToolParams{
